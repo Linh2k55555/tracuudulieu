@@ -3,7 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { GoogleGenAI } = require('@google/genai'); // SDK MỚI
 const { fullContext } = require('./knowledgeBase');
 
 const app = express();
@@ -15,14 +15,19 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ============ KHỞI TẠO GEMINI ============
-const GEMINI_MODEL = "gemini-3.6-flash";
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({
-    model: GEMINI_MODEL,
-    systemInstruction: fullContext,
-});
+const GEMINI_MODEL = "gemini-3.6-flash"; // Model mới
 
-console.log(`[AI] Đã khởi tạo model: ${GEMINI_MODEL}`);
+// Kiểm tra API key có tồn tại không
+if (!process.env.GEMINI_API_KEY) {
+    console.error('[FATAL] GEMINI_API_KEY chưa được cấu hình trong biến môi trường!');
+    process.exit(1);
+}
+
+// SDK mới: khởi tạo client với API key
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+console.log(`[AI] Đã khởi tạo SDK @google/genai với model: ${GEMINI_MODEL}`);
+console.log(`[AI] API Key prefix: ${process.env.GEMINI_API_KEY.substring(0, 4)}...`);
 
 // ============ API CHAT ============
 app.post('/api/chat', async (req, res) => {
@@ -37,21 +42,17 @@ app.post('/api/chat', async (req, res) => {
     try {
         const startTime = Date.now();
 
-        // Nếu có lịch sử chat, dùng chat session để AI nhớ ngữ cảnh
-        let responseText;
-        if (Array.isArray(history) && history.length > 0) {
-            const chat = model.startChat({
-                history: history.map((h) => ({
-                    role: h.role, // 'user' hoặc 'model'
-                    parts: [{ text: h.text }],
-                })),
-            });
-            const result = await chat.sendMessage(message);
-            responseText = result.response.text();
-        } else {
-            const result = await model.generateContent(message);
-            responseText = result.response.text();
-        }
+        // SDK mới: cấu hình nằm trong đối tượng config khi gọi generateContent
+        const response = await ai.models.generateContent({
+            model: GEMINI_MODEL,
+            contents: message,
+            config: {
+                systemInstruction: fullContext,
+            },
+        });
+
+        // SDK mới: truy cập text trực tiếp qua thuộc tính .text
+        const responseText = response.text;
 
         const duration = Date.now() - startTime;
         console.log(`[AI] Phản hồi trong ${duration}ms. Độ dài: ${responseText.length} ký tự.`);
@@ -75,6 +76,7 @@ app.get('/api/health', (req, res) => {
     res.json({
         status: 'ok',
         model: GEMINI_MODEL,
+        sdk: '@google/genai',
         uptime: process.uptime(),
     });
 });
