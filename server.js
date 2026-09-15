@@ -3,7 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const { GoogleGenAI } = require('@google/genai'); // SDK MỚI
+const OpenAI = require('openai');
 const { fullContext } = require('./knowledgeBase');
 
 const app = express();
@@ -14,20 +14,24 @@ app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ============ KHỞI TẠO GEMINI ============
-const GEMINI_MODEL = "gemini-3.6-flash"; // Model mới
+// ============ CẤU HÌNH DEEPSEEK ============
+// Model khả dụng: "deepseek-chat" (V3), "deepseek-reasoner" (R1)
+// - deepseek-chat: nhanh, rẻ, phù hợp cho tra cứu tài liệu
+// - deepseek-reasoner: suy luận sâu hơn, chậm hơn, đắt hơn
+const DEEPSEEK_MODEL = "deepseek-chat";
 
-// Kiểm tra API key có tồn tại không
-if (!process.env.GEMINI_API_KEY) {
-    console.error('[FATAL] GEMINI_API_KEY chưa được cấu hình trong biến môi trường!');
+if (!process.env.DEEPSEEK_API_KEY) {
+    console.error('[FATAL] DEEPSEEK_API_KEY chưa được cấu hình!');
     process.exit(1);
 }
 
-// SDK mới: khởi tạo client với API key
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const client = new OpenAI({
+    apiKey: process.env.DEEPSEEK_API_KEY,
+    baseURL: 'https://api.deepseek.com',
+});
 
-console.log(`[AI] Đã khởi tạo SDK @google/genai với model: ${GEMINI_MODEL}`);
-console.log(`[AI] API Key prefix: ${process.env.GEMINI_API_KEY.substring(0, 4)}...`);
+console.log(`[AI] Đã khởi tạo DeepSeek client với model: ${DEEPSEEK_MODEL}`);
+console.log(`[AI] API Key prefix: ${process.env.DEEPSEEK_API_KEY.substring(0, 6)}...`);
 
 // ============ API CHAT ============
 app.post('/api/chat', async (req, res) => {
@@ -42,31 +46,65 @@ app.post('/api/chat', async (req, res) => {
     try {
         const startTime = Date.now();
 
-        // SDK mới: cấu hình nằm trong đối tượng config khi gọi generateContent
-        const response = await ai.models.generateContent({
-            model: GEMINI_MODEL,
-            contents: message,
-            config: {
-                systemInstruction: fullContext,
-            },
+        // Xây dựng mảng messages: system + history + câu hỏi mới
+        const messages = [
+            { role: 'system', content: fullContext },
+        ];
+
+        // Thêm lịch sử chat nếu có (giữ tối đa 10 cặp để tiết kiệm token)
+        if (Array.isArray(history) && history.length > 0) {
+            const trimmed = history.slice(-20); // 10 cặp user/model
+            for (const h of trimmed) {
+                messages.push({
+                    role: h.role === 'model' ? 'assistant' : 'user',
+                    content: h.text,
+                });
+            }
+        }
+
+        messages.push({ role: 'user', content: message });
+
+        // Gọi DeepSeek API (tương thích OpenAI)
+        const completion = await client.chat.completions.create({
+            model: DEEPSEEK_MODEL,
+            messages: messages,
+            temperature: 0.3,      // Thấp để trả lời chính xác, ít sáng tạo
+            max_tokens: 4000,      // Giới hạn độ dài câu trả lời
+            top_p: 0.95,
         });
 
-        // SDK mới: truy cập text trực tiếp qua thuộc tính .text
-        const responseText = response.text;
+        const responseText = completion.choices[0].message.content;
 
         const duration = Date.now() - startTime;
-        console.log(`[AI] Phản hồi trong ${duration}ms. Độ dài: ${responseText.length} ký tự.`);
+        const usage = completion.usage || {};
+        console.log(
+            `[AI] Phản hồi trong ${duration}ms. ` +
+            `Độ dài: ${responseText.length} ký tự. ` +
+            `Tokens: input=${usage.prompt_tokens || '?'}, output=${usage.completion_tokens || '?'}`
+        );
 
         res.json({
             success: true,
             reply: responseText,
             duration,
+            tokens: usage,
         });
     } catch (error) {
         console.error('[ERROR]', error.message);
-        res.status(500).json({
+
+        // Phân loại lỗi để trả về thông báo phù hợp
+        let userMessage = 'Đã xảy ra lỗi khi kết nối với AI. Vui lòng thử lại sau.';
+        if (error.status === 401) {
+            userMessage = 'API key DeepSeek không hợp lệ. Vui lòng kiểm tra lại.';
+        } else if (error.status === 402) {
+            userMessage = 'Tài khoản DeepSeek đã hết số dư. Vui lòng nạp thêm.';
+        } else if (error.status === 429) {
+            userMessage = 'Quá nhiều yêu cầu. Vui lòng chờ vài giây rồi thử lại.';
+        }
+
+        res.status(error.status || 500).json({
             success: false,
-            error: 'Đã xảy ra lỗi khi kết nối với AI. Vui lòng thử lại sau.',
+            error: userMessage,
         });
     }
 });
@@ -75,8 +113,8 @@ app.post('/api/chat', async (req, res) => {
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'ok',
-        model: GEMINI_MODEL,
-        sdk: '@google/genai',
+        provider: 'deepseek',
+        model: DEEPSEEK_MODEL,
         uptime: process.uptime(),
     });
 });
@@ -85,7 +123,7 @@ app.get('/api/health', (req, res) => {
 app.listen(PORT, () => {
     console.log('==================================================');
     console.log(`🌐 SAPD AI Web đang chạy tại: http://localhost:${PORT}`);
-    console.log(`🤖 Model: ${GEMINI_MODEL}`);
+    console.log(`🤖 Provider: DeepSeek | Model: ${DEEPSEEK_MODEL}`);
     console.log(`📚 Đã nạp tài liệu SAPD + Bảng Luật San Andreas`);
     console.log('==================================================');
 });
