@@ -1,7 +1,14 @@
 services:
   - type: web
-    name: sapd-ai-assistant
+    name: tracuudulieu
     env: node
     plan: free
     buildCommand: npm install
     startCommand: npm start
+    envVars:
+      - key: DEEPSEEK_API_KEY
+        sync: false        # false = bắt buộc set thủ công trong Dashboard, không lưu vào repo
+      - key: DEEPSEEK_MODEL
+        value: deepseek-chat
+      - key: NODE_ENV
+        value: production
